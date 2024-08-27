@@ -11,7 +11,7 @@ import { EventEmitter } from 'events';
 import getStream = require('get-stream');
 import * as _ from 'lodash';
 import { HttpClient } from './http';
-import { IHeaders, IHttpClient, IMTOMAttachments, IOptions, ISecurity, SoapMethod, SoapMethodAsync } from './types';
+import { IAttachments, IHeaders, IHttpClient, IOptions, ISecurity, SoapMethod, SoapMethodAsync } from './types';
 import { findPrefix } from './utils';
 import { WSDL } from './wsdl';
 import { IPort, OperationElement, ServiceElement } from './wsdl/elements';
@@ -53,7 +53,7 @@ export class Client extends EventEmitter {
   public lastResponse?: any;
   public lastResponseHeaders?: AxiosResponseHeaders | RawAxiosResponseHeaders;
   public lastElapsedTime?: number;
-  public lastResponseAttachments: IMTOMAttachments;
+  public lastResponseAttachments: IAttachments;
 
   public wsdl: WSDL;
   private httpClient: IHttpClient;
@@ -230,23 +230,22 @@ export class Client extends EventEmitter {
   private _promisifyMethod(method: SoapMethod): SoapMethodAsync {
     return (args: any, options?: any, extraHeaders?: any) => {
       return new Promise((resolve, reject) => {
-        const callback = (
-          err: any,
-          result: any,
-          rawResponse: any,
-          soapHeader: any,
-          rawRequest: any,
-          mtomAttachments: any,
-        ) => {
-          if (err) {
-            reject(err);
-          } else {
-            resolve([result, rawResponse, soapHeader, rawRequest, mtomAttachments]);
-          }
-        };
         method(
           args,
-          callback,
+          (
+            err,
+            result,
+            rawResponse,
+            soapHeader,
+            rawRequest,
+            responseAttachments
+          ) => {
+            if (err) {
+              reject(err);
+            } else {
+              resolve([result, rawResponse, soapHeader, rawRequest, responseAttachments]);
+            }
+          },
           options,
           extraHeaders,
         );
@@ -288,7 +287,7 @@ export class Client extends EventEmitter {
     }
   }
 
-  private _invoke(method: OperationElement, args, location: string, callback: (err: any, result: any, rawResponse: any, soapHeader: any, rawRequest?: any, mtomAttachments?: IMTOMAttachments) => void, options, extraHeaders) {
+  private _invoke(method: OperationElement, args, location: string, callback: (err: any, result: any, rawResponse: any, soapHeader: any, rawRequest?: any, responseAttachments?: IAttachments) => void, options, extraHeaders) {
     const name = method.$name;
     const input = method.input;
     const output = method.output;
@@ -312,7 +311,7 @@ export class Client extends EventEmitter {
 
       if (!output) {
         // one-way, no output expected
-        return callback(null, null, body, obj.Header, xml, response.mtomResponseAttachments);
+        return callback(null, null, body, obj.Header, xml, response.responseAttachments);
       }
 
       // If it's not HTML and Soap Body is empty
@@ -349,7 +348,7 @@ export class Client extends EventEmitter {
         });
       }
 
-      callback(null, result, body, obj.Header, xml, response.mtomResponseAttachments);
+      callback(null, result, body, obj.Header, xml, response.responseAttachments);
     };
 
     const parseSync = (body: any, response) => {
@@ -370,7 +369,7 @@ export class Client extends EventEmitter {
         error.response = response;
         error.body = body;
         this.emit('soapError', error, eid);
-        return callback(error, response, body, undefined, xml, response.mtomResponseAttachments);
+        return callback(error, response, body, undefined, xml, response.responseAttachments);
       }
       return finish(obj, body, response);
     };
@@ -549,7 +548,7 @@ export class Client extends EventEmitter {
       if (response) {
         this.lastResponseHeaders = response.headers;
         this.lastElapsedTime = Date.now() - startTime;
-        this.lastResponseAttachments = response.mtomResponseAttachments;
+        this.lastResponseAttachments = response.responseAttachments;
         // Added mostly for testability, but possibly useful for debugging
         this.lastRequestHeaders = response.config && response.config.headers;
       }

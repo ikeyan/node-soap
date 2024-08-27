@@ -26,9 +26,9 @@ export type SoapMethodAsync = (
   args: any,
   options?: any,
   extraHeaders?: any,
-) => Promise<[any, any, any, any, IMTOMAttachments?]>;
+) => Promise<[any, any, any, any, IAttachments?]>;
 
-export type SoapMethodCallback = (err: any, result: any, rawResponse: any, soapHeader: any, rawRequest: any, mtomAttachments?: IMTOMAttachments) => void;
+export type SoapMethodCallback = (err: any, result: any, rawResponse: any, soapHeader: any, rawRequest: any, attachments?: IAttachments) => void;
 
 export type ISoapServiceMethod = (args: any, callback?: (data: any) => void, headers?: any, req?: any, res?: any, sender?: any) => any;
 
@@ -161,9 +161,37 @@ export interface IServerOptions extends IWsdlBaseOptions {
   enableChunkedEncoding?: boolean;
 }
 
+export interface IDIMEAttachmentTypeMime {
+  type: 'MIME';
+  mimeType: string;
+}
+
+export interface IDIMEAttachmentTypeUri {
+  type: 'URI';
+  uri: string;
+}
+
+export interface IDIMEAttachmentTypeUnknown {
+  type: 'Unknown';
+}
+
+export interface IDIMEAttachment {
+  id: string;
+  type: IDIMEAttachmentTypeMime | IDIMEAttachmentTypeUri | IDIMEAttachmentTypeUnknown;
+  body: Buffer;
+}
+
+export interface IDIMEAttachments {
+  type: 'DIME';
+  parts: IDIMEAttachment[];
+}
+
 export interface IMTOMAttachments {
+  type: 'MTOM';
   parts: Array<{
     body: Buffer,
     headers: { [key: string]: string },
   }>;
 }
+
+export type IAttachments = IMTOMAttachments | IDIMEAttachments;

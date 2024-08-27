@@ -11,8 +11,8 @@ import { ReadStream } from 'fs';
 import * as url from 'url';
 import MIMEType = require('whatwg-mimetype');
 import { gzipSync } from 'zlib';
-import { IExOptions, IHeaders, IHttpClient, IOptions } from './types';
-import { parseMTOMResp } from './utils';
+import { IDIMEAttachments, IExOptions, IHeaders, IHttpClient, IOptions } from './types';
+import { parseDIMEResponse, parseMTOMResp } from './utils';
 
 const debug = debugBuilder('node-soap');
 const VERSION = require('../package.json').version;
@@ -216,13 +216,9 @@ export class HttpClient implements IHttpClient {
       };
 
       if (_this.options.parseReponseAttachments) {
-        const isMultipartResp = res.headers['content-type'] && res.headers['content-type'].toLowerCase().indexOf('multipart/related') > -1;
-        if (isMultipartResp) {
-          let boundary;
-          const parsedContentType = MIMEType.parse(res.headers['content-type']);
-          if (parsedContentType) {
-            boundary = parsedContentType.parameters.get('boundary');
-          }
+        const contentType = res.headers['content-type'] ? MIMEType.parse(res.headers['content-type']) : null;
+        if (contentType?.essence === 'multipart/related') {
+          const boundary = contentType?.parameters.get('boundary');
           if (!boundary) {
             return callback(new Error('Missing boundary from content-type'));
           }
@@ -235,10 +231,23 @@ export class HttpClient implements IHttpClient {
             if (!firstPart || !firstPart.body) {
               return callback(new Error('Cannot parse multipart response'));
             }
-            (res as any).mtomResponseAttachments = multipartResponse;
+            (res as any).responseAttachments = multipartResponse;
             return handleBody(firstPart.body.toString('utf8'));
           });
-        } else {
+        } else if (contentType?.essence === 'application/dime') {
+          let attachments: IDIMEAttachments;
+          try {
+            attachments = parseDIMEResponse(res.data);
+          } catch (err) {
+            return callback(err);
+          }
+          const firstPart = attachments.parts.shift();
+          if (!firstPart) {
+            return callback(new Error('Cannot parse DIME response'));
+          }
+          (res as any).responseAttachments = attachments;
+          return handleBody(firstPart.body.toString('utf8'));
+      } else {
           return handleBody(res.data.toString('utf8'));
         }
       } else {
