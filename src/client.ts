@@ -78,7 +78,7 @@ export class Client extends EventEmitter {
   }
 
   /** add soapHeader to soap:Header node */
-  public addSoapHeader(soapHeader: any, name?: string, namespace?: any, xmlns?: string): number {
+  public addSoapHeader(soapHeader: any, name?: string, namespace?: string, xmlns?: string): number {
     if (!this.soapHeaders) {
       this.soapHeaders = [];
     }
@@ -86,7 +86,7 @@ export class Client extends EventEmitter {
     return this.soapHeaders.push(soapHeader) - 1;
   }
 
-  public changeSoapHeader(index: any, soapHeader: any, name?: any, namespace?: any, xmlns?: any): void {
+  public changeSoapHeader(index: number, soapHeader: any, name?: string, namespace?: string, xmlns?: string): void {
     if (!this.soapHeaders) {
       this.soapHeaders = [];
     }
@@ -197,7 +197,11 @@ export class Client extends EventEmitter {
 
   private _defineService(service: ServiceElement, endpoint?: string) {
     const ports = service.ports;
-    const def = {};
+    const def: {
+      [portName: string]: {
+        [methodName: string]: SoapMethod;
+      };
+    } = {};
     for (const name in ports) {
       def[name] = this._definePort(ports[name], endpoint ? endpoint : ports[name].location);
     }
@@ -251,37 +255,27 @@ export class Client extends EventEmitter {
   }
 
   private _defineMethod(method: OperationElement, location: string): SoapMethod {
-    let temp;
     return (args, callback, options, extraHeaders) => {
       if (typeof args === 'function') {
         callback = args;
         args = {};
       } else if (typeof options === 'function') {
-        temp = callback;
-        callback = options;
-        options = temp;
+        [callback, options] = [options, callback];
       } else if (typeof extraHeaders === 'function') {
-        temp = callback;
-        callback = extraHeaders;
-        extraHeaders = options;
-        options = temp;
+        [callback, options, extraHeaders] = [extraHeaders, callback, options];
       }
-      this._invoke(method, args, location, (error, result, rawResponse, soapHeader, rawRequest, mtomAttachments) => {
-        callback(error, result, rawResponse, soapHeader, rawRequest, mtomAttachments);
-      }, options, extraHeaders);
+      this._invoke(method, args, location, callback, options, extraHeaders);
     };
   }
 
-  private _processSoapHeader(soapHeader, name, namespace, xmlns) {
+  private _processSoapHeader(soapHeader, name?: string, namespace?: string, xmlns?: string) {
     switch (typeof soapHeader) {
       case 'object':
         return this.wsdl.objectToXML(soapHeader, name, namespace, xmlns, true);
       case 'function':
         const _this = this;
-        // arrow function does not support arguments variable
-        // tslint:disable-next-line
-        return function () {
-          const result = soapHeader.apply(null, arguments);
+        return (...args) => {
+          const result = soapHeader.apply(null, args);
 
           if (typeof result === 'object') {
             return _this.wsdl.objectToXML(result, name, namespace, xmlns, true);
@@ -294,7 +288,7 @@ export class Client extends EventEmitter {
     }
   }
 
-  private _invoke(method: OperationElement, args, location: string, callback, options, extraHeaders) {
+  private _invoke(method: OperationElement, args, location: string, callback: (err: any, result: any, rawResponse: any, soapHeader: any, rawRequest?: any, mtomAttachments?: IMTOMAttachments) => void, options, extraHeaders) {
     const name = method.$name;
     const input = method.input;
     const output = method.output;
@@ -358,7 +352,7 @@ export class Client extends EventEmitter {
       callback(null, result, body, obj.Header, xml, response.mtomResponseAttachments);
     };
 
-    const parseSync = (body, response) => {
+    const parseSync = (body: any, response) => {
       let obj;
       try {
         obj = this.wsdl.xmlToObject(body);
@@ -475,7 +469,7 @@ export class Client extends EventEmitter {
       for (const attr in extraHeaders) { headers[attr] = extraHeaders[attr]; }
     }
 
-    const tryJSONparse = (body) => {
+    const tryJSONparse = (body: string) => {
       try {
         return JSON.parse(body);
       } catch (err) { return undefined; }
@@ -537,8 +531,7 @@ export class Client extends EventEmitter {
             this.emit('response', '<stream>', res.data, eid);
 
             if (error) {
-              error.response = res;
-              error.body = '<stream>';
+              error = Object.assign(error, { response: res, body: '<stream>' });
               this.emit('soapError', error, eid);
               return callback(error, res, undefined, undefined, xml);
             }

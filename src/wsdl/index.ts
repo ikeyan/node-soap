@@ -15,7 +15,7 @@ import * as stripBom from 'strip-bom';
 import * as url from 'url';
 import { HttpClient } from '../http';
 import { NamespaceContext } from '../nscontext';
-import { IOptions } from '../types';
+import { IOptions, WSDLCache } from '../types';
 import { findPrefix, splitQName, TNS_PREFIX, xmlEscape } from '../utils';
 import * as elements from './elements';
 
@@ -23,7 +23,7 @@ const debug = debugBuilder('node-soap');
 
 const XSI_URI = 'http://www.w3.org/2001/XMLSchema-instance';
 
-export function trim(text) {
+export function trim(text: string): string {
   return text.trim();
 }
 
@@ -56,15 +56,15 @@ export class WSDL {
   public definitions: elements.DefinitionsElement;
   public options: IInitializedOptions;
   /** @internal */
-  public WSDL_CACHE;
+  public WSDL_CACHE: WSDLCache;
 
-  private callback: (err: Error, caller?) => void;
+  private callback: (this: void, err: Error, caller?: WSDL) => void;
   private services: { [name: string]: elements.ServiceElement };
   private xml: string;
   private _includesWsdl;
   private _originalIgnoredNamespaces;
 
-  constructor(definition: any, uri: string, options: IOptions) {
+  constructor(definition: any, uri: string, options?: IOptions) {
     let fromFunc;
 
     this.uri = uri;
@@ -152,7 +152,7 @@ export class WSDL {
     });
   }
 
-  public onReady(callback: (err: Error) => void): void {
+  public onReady(callback: (err: Error, caller?: WSDL) => void): void {
     if (callback) {
       this.callback = callback;
     }
@@ -190,10 +190,15 @@ export class WSDL {
     return saxStream;
   }
 
-  public xmlToObject(xml, callback?) {
-    const p: any = typeof callback === 'function' ? {} : sax.parser(true, null);
+  public xmlToObject(xml: string, callback?: undefined): Record<string, any>;
+  public xmlToObject(xml: NodeJS.ReadableStream, callback: (...args: [err: Error, r?: undefined] | [err: null, r: any]) => void): void;
+  public xmlToObject(
+    ...args:
+      | [xml: string, callback?: undefined]
+      | [xml: NodeJS.ReadableStream, callback: (...args: [err: Error, r?: undefined] | [err: null, r: any]) => void]
+  ) {
     let objectName = null;
-    const root: any = {};
+    const root: StackItemObject = {};
     const schema = {
       Envelope: {
         Header: {
@@ -213,23 +218,56 @@ export class WSDL {
         },
       },
     };
-    const stack: any[] = [{ name: null, object: root, schema: schema }];
-    const xmlns: any = {};
+    interface StackItemObject {
+      Envelope?: {
+        Header?: {
+          Security?: {
 
-    const refs = {};
-    let id; // {id:{hrefs:[],obj:}, ...}
+          };
+        };
+        Body?: {
+          Fault?: {
+            faultcode?: string | { $value: string };
+            faultstring?: string | { $value: string };
+            detail?: string | { $value: string };
+            Code?: { Value: string; Subcode?: { Value: string } };
+            Reason?: { Text: string | { $value: string } };
+            Detail?: string;
+          }
+        };
+      };
+    }
+    interface StackItem {
+      name: string | null;
+      id?: string;
+      object: any;
+      schema: string | Record<string, any>;
+      nil?: boolean;
+      // exists only if preserveWhitespace is true
+      text?: string;
+    }
+    const stack: StackItem[] = [{ name: null, object: root, schema: schema }];
+    const xmlns: Record<string, string> = {};
 
-    p.onopentag = (node) => {
+    const refs: Record<string, {
+      hrefs: {
+        par: StackItemObject;
+        key: string;
+        obj: Record<string, Record<string, string>>;
+      }[];
+      obj: StackItemObject | null;
+    }> = {};
+
+    const onopentag = (p: sax.SAXParser | sax.SAXStream) => (node: sax.Tag | sax.QualifiedTag) => {
+      if ('ns' in node) {
+        throw new Error('Expected node to be a sax.Tag, but it has ns');
+      }
       const nsName = node.name;
-      const attrs: any = node.attributes;
+      const attrs = node.attributes;
       let name = splitQName(nsName).name;
-      let attributeName;
       const top = stack[stack.length - 1];
       let topSchema = top.schema;
-      const elementAttributes = {};
-      let hasNonXmlnsAttribute = false;
-      let hasNilAttribute = false;
-      const obj = {};
+      const obj: Record<string, Record<string, string>> = {}; // { [this.options.attributesKey]: Record<string, string> }
       const originalName = name;
 
       if (!objectName && top.name === 'Body' && name !== 'Fault') {
@@ -266,7 +304,7 @@ export class WSDL {
             this.definitions.messages[originalName] = this.definitions.messages[name];
           } catch (e) {
             if (this.options.returnFault) {
-              p.onerror(e);
+              onerror(p)(e);
             }
           }
         }
@@ -276,20 +314,23 @@ export class WSDL {
       }
 
       if (attrs.href) {
-        id = attrs.href.substr(1);
+        const id = attrs.href.substring(1);
         if (!refs[id]) {
           refs[id] = { hrefs: [], obj: null };
         }
         refs[id].hrefs.push({ par: top.object, key: name, obj: obj });
       }
-      if (id = attrs.id) {
+      if (attrs.id) {
+        const id = attrs.id;
         if (!refs[id]) {
           refs[id] = { hrefs: [], obj: null };
         }
       }
 
       // Handle element attributes
-      for (attributeName in attrs) {
+      const elementAttributes: Record<string, string> = {};
+      let hasNonXmlnsAttribute = false;
+      for (const attributeName in attrs) {
         if (/^xmlns:|^xmlns$/.test(attributeName)) {
           xmlns[splitQName(attributeName).name] = attrs[attributeName];
           continue;
@@ -298,7 +339,8 @@ export class WSDL {
         elementAttributes[attributeName] = attrs[attributeName];
       }
 
-      for (attributeName in elementAttributes) {
+      let hasNilAttribute = false;
+      for (const attributeName in elementAttributes) {
         const res = splitQName(attributeName);
         if (res.name === 'nil' && xmlns[res.prefix] === XSI_URI && elementAttributes[attributeName] &&
           (elementAttributes[attributeName].toLowerCase() === 'true' || elementAttributes[attributeName] === '1')
@@ -314,7 +356,7 @@ export class WSDL {
 
       // Pick up the schema for the type specified in element's xsi:type attribute.
       let xsiTypeSchema;
-      let xsiType;
+      let xsiType: string | undefined;
 
       for (const prefix in xmlns) {
         if (xmlns[prefix] === XSI_URI && (`${prefix}:type` in elementAttributes)) {
@@ -325,7 +367,7 @@ export class WSDL {
 
       if (xsiType) {
         const type = splitQName(xsiType);
-        let typeURI;
+        let typeURI: string;
         if (type.prefix === TNS_PREFIX) {
           // In case of xsi:type = "MyType"
           typeURI = xmlns[type.prefix] || xmlns.xmlns;
@@ -344,8 +386,8 @@ export class WSDL {
       stack.push({ name: originalName, object: obj, schema: (xsiTypeSchema || (topSchema && topSchema[name])), id: attrs.id, nil: hasNilAttribute });
     };
 
-    p.onclosetag = (nsName) => {
-      const cur: any = stack.pop();
+    const onclosetag = (nsName: string) => {
+      const cur = stack.pop();
       let obj = cur.object;
       const top = stack[stack.length - 1];
       const topObject = top.object;
@@ -370,7 +412,7 @@ export class WSDL {
         obj = null;
       }
 
-      if (topSchema && topSchema[name + '[]']) {
+      if (topSchema?.[name + '[]']) {
         if (!topObject[name]) {
           topObject[name] = [];
         }
@@ -389,7 +431,7 @@ export class WSDL {
       }
     };
 
-    p.oncdata = (text) => {
+    const oncdata = (text: string): void => {
       const originalText = text;
       text = trim(text);
       if (!text.length) {
@@ -405,23 +447,23 @@ export class WSDL {
           top.object = value;
         }
       } else {
-        p.ontext(originalText);
+        ontext(originalText);
       }
     };
 
-    p.onerror = (e) => {
+    const onerror = (p: sax.SAXParser | sax.SAXStream) => (e: Error): never => {
       p.resume();
       throw {
         Fault: {
           faultcode: 500,
           faultstring: 'Invalid XML',
-          detail: new Error(e).message,
+          detail: String(e),
           statusCode: 500,
         },
       };
     };
 
-    p.ontext = (text) => {
+    const ontext = (text: string) => {
       const top = stack[stack.length - 1];
 
       const originalText = text;
@@ -433,10 +475,10 @@ export class WSDL {
         return;
       }
 
-      const name = splitQName(top.schema).name;
+      const name = splitQName(top.schema as string).name;
       let value;
 
-      if (this.options && this.options.customDeserializer && this.options.customDeserializer[name]) {
+      if (this.options?.customDeserializer?.[name]) {
         value = this.options.customDeserializer[name](text, top);
       } else {
         if (name === 'int' || name === 'integer' || name === 'short' || name === 'long') {
@@ -467,13 +509,15 @@ export class WSDL {
       }
     };
 
-    if (typeof callback === 'function') {
+    const xml = args[0];
+    if (typeof xml === 'object') {
+      const callback = args[1];
       // we be streaming
       const saxStream = sax.createStream(true, null);
-      saxStream.on('opentag', p.onopentag);
-      saxStream.on('closetag', p.onclosetag);
-      saxStream.on('cdata', p.oncdata);
-      saxStream.on('text', p.ontext);
+      saxStream.on('opentag', onopentag(saxStream));
+      saxStream.on('closetag', onclosetag);
+      saxStream.on('cdata', oncdata);
+      saxStream.on('text', ontext);
       xml.pipe(saxStream)
         .on('error', (err) => {
           callback(err);
@@ -489,44 +533,44 @@ export class WSDL {
         });
       return;
     }
+    const p = sax.parser(true, null);
+    p.onopentag = onopentag(p);
+    p.onclosetag = onclosetag;
+    p.oncdata = oncdata;
+    p.onerror = onerror(p);
+    p.ontext = ontext;
     p.write(xml).close();
 
     return finish();
 
     function finish() {
       // MultiRef support: merge objects instead of replacing
-      for (const n in refs) {
-        const ref = refs[n];
+      for (const ref of Object.values(refs)) {
         for (const href of ref.hrefs) {
           Object.assign(href.obj, ref.obj);
         }
       }
 
-      if (root.Envelope) {
-        const body = root.Envelope.Body;
-        if (body && body.Fault) {
-          const fault = body.Fault;
-          let code = fault.faultcode && fault.faultcode.$value;
-          let string = fault.faultstring && fault.faultstring.$value;
-          let detail = fault.detail && fault.detail.$value;
+      if (root.Envelope?.Body?.Fault) {
+        const fault = root.Envelope.Body.Fault;
+        const coerceToString = (x: string | { $value: string } | undefined): string | undefined => (typeof x === 'object' ? x.$value : x);
+        let code = coerceToString(fault.faultcode);
+        let string = coerceToString(fault.faultstring);
+        let detail = coerceToString(fault.detail);
 
-          code = code || fault.faultcode;
-          string = string || fault.faultstring;
-          detail = detail || fault.detail;
-          // SOAP 1.2
-          code = code || fault.Code && `${fault.Code.Value}: ${fault.Code.Subcode && fault.Code.Subcode.Value}`;
-          string = string || fault.Reason && fault.Reason.Text.$value;
-          string = string || fault.Reason && fault.Reason.Text;
-          detail = detail || fault.Detail;
+        // SOAP 1.2
+        code ||= fault.Code && `${fault.Code.Value}: ${fault.Code.Subcode?.Value}`;
+        string ||= coerceToString(fault.Reason?.Text);
+        detail ||= fault.Detail;
 
-          const error: any = new Error(code + ': ' + string + (detail ? ': ' + JSON.stringify(detail) : ''));
+        const error = Object.assign(
+          new Error(`${code}: ${string}${detail ? `: ${JSON.stringify(detail)}` : ''}`),
+          { root },
+        );
 
-          error.root = root;
-          throw error;
-        }
-        return root.Envelope;
+        throw error;
       }
-      return root;
+      return root.Envelope || root;
     }
   }
 
@@ -536,27 +580,21 @@ export class WSDL {
    * @param {String} qname Local or qualified name
    * @returns {*} The XSD type/element definition
    */
-  public findSchemaObject(nsURI: string, qname: string) {
+  public findSchemaObject(nsURI: string, qname: string): elements.ComplexTypeElement | elements.SimpleTypeElement | elements.ElementElement | null {
     if (!nsURI || !qname) {
       return null;
     }
 
-    let def = null;
+    const schema = this.definitions.schemas?.[nsURI];
+    if (schema) {
+      qname = qname.substring(qname.indexOf(':') + 1);
 
-    if (this.definitions.schemas) {
-      const schema = this.definitions.schemas[nsURI];
-      if (schema) {
-        if (qname.indexOf(':') !== -1) {
-          qname = qname.substring(qname.indexOf(':') + 1, qname.length);
-        }
-
-        // if the client passed an input element which has a `$lookupType` property instead of `$type`
-        // the `def` is found in `schema.elements`.
-        def = schema.complexTypes[qname] || schema.types[qname] || schema.elements[qname];
-      }
+      // if the client passed an input element which has a `$lookupType` property instead of `$type`
+      // the `def` is found in `schema.elements`.
+      return schema.complexTypes[qname] || schema.types[qname] || schema.elements[qname];
     }
 
-    return def;
+    return null;
   }
 
   /**
@@ -643,11 +681,13 @@ export class WSDL {
    * @param {?} parameterTypeObject
    * @param {NamespaceContext} nsContext Namespace context
    */
-  public objectToXML(obj, name: string, nsPrefix: any, nsURI: string, isFirst?: boolean, xmlnsAttr?, schemaObject?, nsContext?: NamespaceContext) {
-    const schema = this.definitions.schemas[nsURI];
+  public objectToXML(obj: any[], name: string, nsPrefix: string | { parent: string; current: string }, nsURI?: string, isFirst?: boolean, xmlnsAttr?: string, schemaObject?, nsContext?: NamespaceContext): string;
+  public objectToXML(obj: Record<string, any> | string | null | undefined, name?: string, nsPrefix?: string | { parent: string; current: string }, nsURI?: string, isFirst?: boolean, xmlnsAttr?: string, schemaObject?, nsContext?: NamespaceContext): string;
+  public objectToXML(obj: string | null | object | undefined, name: string, nsPrefix: string | { parent: string; current: string }, nsURI?: string, isFirst?: boolean, xmlnsAttr?: string, schemaObject?, nsContext?: NamespaceContext): string {
+    const schema = nsURI === undefined ? undefined : this.definitions.schemas[nsURI];
 
-    let parentNsPrefix = nsPrefix ? nsPrefix.parent : undefined;
-    if (typeof parentNsPrefix !== 'undefined') {
+    let parentNsPrefix = typeof nsPrefix === 'object' ? nsPrefix.parent : undefined;
+    if (typeof nsPrefix === 'object') {
       // we got the parentNsPrefix for our array. setting the namespace-variable back to the current namespace string
       nsPrefix = nsPrefix.current;
     }
@@ -659,7 +699,7 @@ export class WSDL {
 
     const soapHeader = !schema;
     const qualified = schema && schema.$elementFormDefault === 'qualified';
-    const parts = [];
+    const parts: string[] = [];
     const prefixNamespace = (nsPrefix || qualified) && nsPrefix !== TNS_PREFIX;
 
     let xmlnsAttrib = '';
@@ -698,8 +738,6 @@ export class WSDL {
       ns = nsPrefix;
     }
 
-    let i;
-    let n;
     // start building out XML string.
     if (Array.isArray(obj)) {
       let nonSubNameSpace = '';
@@ -713,7 +751,7 @@ export class WSDL {
         name = name.substr(1);
       }
 
-      for (i = 0, n = obj.length; i < n; i++) {
+      for (let i = 0, n = obj.length; i < n; i++) {
         const item = obj[i];
         const arrayAttr = this.processAttributes(item, nsContext);
         const correctOuterNsPrefix = nonSubNameSpace || parentNsPrefix || ns; // using the parent namespace prefix if given
@@ -746,7 +784,7 @@ export class WSDL {
       }
     } else if (typeof obj === 'object') {
       let currentChildXmlnsAttrib = '';
-      for (name in obj) {
+      for (let name in obj) {
         // Happens when Object.create(null) is used, it will not inherit the Object prototype
         if (!obj.hasOwnProperty) {
           obj = Object.assign({}, obj);
@@ -1032,14 +1070,11 @@ export class WSDL {
     }
 
     let found = null;
-    let i = 0;
-    let child;
-    let ref;
 
     if (Array.isArray(parameterTypeObj.$lookupTypes) && parameterTypeObj.$lookupTypes.length) {
       const types = parameterTypeObj.$lookupTypes;
 
-      for (i = 0; i < types.length; i++) {
+      for (let i = 0; i < types.length; i++) {
         const typeObj = types[i];
 
         if (typeObj.$name === childName) {
@@ -1054,17 +1089,16 @@ export class WSDL {
       return object;
     }
     if (object.$ref) {
-      ref = splitQName(object.$ref);
+      const ref = splitQName(object.$ref);
       if (ref.name === childName) {
         return object;
       }
     }
 
-    let childNsURI;
-
     // want to avoid unecessary recursion to improve performance
     if (object.$type && backtrace.length === 1) {
       const typeInfo = splitQName(object.$type);
+      let childNsURI;
       if (typeInfo.prefix === TNS_PREFIX) {
         childNsURI = parameterTypeObj.$targetNamespace;
       } else {
@@ -1079,7 +1113,7 @@ export class WSDL {
     // handle $base (e.g. for ExtensionElement) like $type
     if (object.$base && (!Array.isArray(object.children) || !object.children.length)) {
       const baseInfo = splitQName(object.$base);
-      childNsURI = parameterTypeObj.$targetNamespace;
+      let childNsURI = parameterTypeObj.$targetNamespace;
       if (baseInfo.prefix !== TNS_PREFIX) {
         childNsURI = this.definitions.xmlns[baseInfo.prefix];
       }
@@ -1090,7 +1124,7 @@ export class WSDL {
     }
 
     if (Array.isArray(object.children) && object.children.length > 0) {
-      for (i = 0, child; child = object.children[i]; i++) {
+      for (let i = 0, child; child = object.children[i]; i++) {
         found = this.findChildSchemaObject(child, childName, backtrace);
         if (found) {
           break;
@@ -1099,7 +1133,7 @@ export class WSDL {
         if (child.$base) {
           const baseQName = splitQName(child.$base);
           const childNameSpace = baseQName.prefix === TNS_PREFIX ? '' : baseQName.prefix;
-          childNsURI = child.xmlns[baseQName.prefix] || child.schemaXmlns[baseQName.prefix];
+          const childNsURI = child.xmlns[baseQName.prefix] || child.schemaXmlns[baseQName.prefix];
 
           const foundBase = this.findSchemaType(baseQName.name, childNsURI);
 
@@ -1123,13 +1157,15 @@ export class WSDL {
     return found;
   }
 
-  private _initializeOptions(options: any) {
+  private _initializeOptions(options: IOptions) {
     this._originalIgnoredNamespaces = (options || {}).ignoredNamespaces;
     this.options = {};
 
     const ignoredNamespaces = options ? options.ignoredNamespaces : null;
 
     if (ignoredNamespaces &&
+      typeof ignoredNamespaces === 'object' &&
+      !Array.isArray(ignoredNamespaces) &&
       (Array.isArray(ignoredNamespaces.namespaces) || typeof ignoredNamespaces.namespaces === 'string')) {
       if (ignoredNamespaces.override) {
         this.options.ignoredNamespaces = ignoredNamespaces.namespaces;
@@ -1239,7 +1275,7 @@ export class WSDL {
     });
   }
 
-  private _parse(xml): elements.DefinitionsElement {
+  private _parse(xml: string): elements.DefinitionsElement {
     const p = sax.parser(true, null);
     const stack: elements.Element[] = [];
     let root: elements.DefinitionsElement = null;
@@ -1249,6 +1285,9 @@ export class WSDL {
     const options = this.options;
 
     p.onopentag = (node) => {
+      if ('ns' in node) {
+        throw new Error('sax parser was instantiated with { xmlns: true }');
+      }
       const nsName = node.name;
       const attrs = node.attributes;
 
@@ -1339,13 +1378,13 @@ export class WSDL {
       if (~ns.indexOf('http://xml.apache.org/')) {
         continue;
       }
-      str += ' xmlns:' + alias + '="' + ns + '"';
+      str += ` xmlns:${alias}="${ns}"`;
     }
     return str;
   }
 }
 
-type WSDLCallback = (error: any, result?: WSDL) => any;
+type WSDLCallback = (this: void, error: any, result?: WSDL) => any;
 
 /*
  * Have another function to load previous WSDLs as we
@@ -1365,42 +1404,40 @@ type WSDLCallback = (error: any, result?: WSDL) => any;
  * By the time file A starts processing its includes its definitions will be already loaded,
  * this is the only thing that B will depend on when "opening" A
  */
-function open_wsdl_recursive(uri: any, callback: WSDLCallback);
-function open_wsdl_recursive(uri: any, options: IOptions, callback: WSDLCallback);
-function open_wsdl_recursive(uri: any, p2: WSDLCallback | IOptions, p3?: WSDLCallback) {
-  let fromCache;
-  let WSDL_CACHE;
+function open_wsdl_recursive(uri: string, callback: WSDLCallback);
+function open_wsdl_recursive(uri: string, options: IOptions, callback: WSDLCallback);
+function open_wsdl_recursive(uri: string, ...args: [WSDLCallback] | [IOptions, WSDLCallback]) {
   let options: IOptions;
   let callback: WSDLCallback;
 
-  if (typeof p2 === 'function') {
+  if (typeof args[0] === 'function') {
     options = {};
-    callback = p2;
+    callback = args[0];
   } else {
-    options = p2;
-    callback = p3;
+    options = args[0];
+    callback = args[1];
   }
 
-  WSDL_CACHE = options.WSDL_CACHE;
-
-  if (fromCache = WSDL_CACHE[uri]) {
+  const WSDL_CACHE = options.WSDL_CACHE;
+  const fromCache = WSDL_CACHE[uri];
+  if (fromCache) {
     return callback.call(fromCache, null, fromCache);
   }
 
   return open_wsdl(uri, options, callback);
 }
 
-export function open_wsdl(uri: any, callback: WSDLCallback);
-export function open_wsdl(uri: any, options: IOptions, callback: WSDLCallback);
-export function open_wsdl(uri: any, p2: WSDLCallback | IOptions, p3?: WSDLCallback) {
+export function open_wsdl(uri: string, callback: WSDLCallback): WSDL;
+export function open_wsdl(uri: string, options: IOptions, callback: WSDLCallback): WSDL;
+export function open_wsdl(uri: string, ...args: [WSDLCallback] | [IOptions, WSDLCallback]): WSDL {
   let options: IOptions;
   let callback: WSDLCallback;
-  if (typeof p2 === 'function') {
+  if (typeof args[0] === 'function') {
     options = {};
-    callback = p2;
-  } else if (typeof p3 === 'function') {
-    options = p2;
-    callback = p3;
+    callback = args[0];
+  } else if (typeof args[1] === 'function') {
+    options = args[0];
+    callback = args[1];
   }
 
   // initialize cache when calling open_wsdl directly

@@ -1,6 +1,7 @@
 
 import * as req from 'axios';
 import { ReadStream } from 'fs';
+import { WSDL } from './wsdl';
 
 export interface IHeaders {
   [k: string]: any;
@@ -17,19 +18,17 @@ export interface IHttpClient {
 
 /** @deprecated use SoapMethod */
 export type ISoapMethod = SoapMethod;
-export type SoapMethod = (
-  args: any,
-  callback: (err: any, result: any, rawResponse: any, soapHeader: any, rawRequest: any, mtomAttachments?: IMTOMAttachments) => void,
-  options?: any,
-  extraHeaders?: any,
-  mtomAttachments?: IMTOMAttachments,
-) => void;
+export interface SoapMethod {
+  (args: any, callback: SoapMethodCallback, options?: any, extraHeaders?: any): void;
+}
 
 export type SoapMethodAsync = (
   args: any,
   options?: any,
   extraHeaders?: any,
 ) => Promise<[any, any, any, any, IMTOMAttachments?]>;
+
+export type SoapMethodCallback = (err: any, result: any, rawResponse: any, soapHeader: any, rawRequest: any, mtomAttachments?: IMTOMAttachments) => void;
 
 export type ISoapServiceMethod = (args: any, callback?: (data: any) => void, headers?: any, req?: any, res?: any, sender?: any) => any;
 
@@ -135,9 +134,13 @@ export interface IOptions extends IWsdlBaseOptions {
   /** if your wsdl operations contains names with Async suffix, you will need to override the default promise suffix to a custom one, default: Async. */
   overridePromiseSuffix?: string;
   /** @internal */
-  WSDL_CACHE?;
+  WSDL_CACHE?: WSDLCache;
   /** handle MTOM soapAttachments in response */
   parseReponseAttachments?: boolean;
+}
+
+export interface WSDLCache {
+  [uri: string]: WSDL;
 }
 
 export interface IOneWayOptions {

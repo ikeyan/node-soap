@@ -36,7 +36,7 @@ export function splitQName<T>(nsName: T) {
   if (typeof nsName !== 'string') {
     return {
       prefix: TNS_PREFIX,
-      name: nsName,
+      name: nsName as Exclude<T, string>,
     };
   }
 
@@ -50,7 +50,7 @@ export function splitQName<T>(nsName: T) {
   };
 }
 
-export function xmlEscape(obj) {
+export function xmlEscape(obj: string) {
   if (typeof (obj) === 'string') {
     if (obj.substr(0, 9) === '<![CDATA[' && obj.substr(-3) === ']]>') {
       return obj;

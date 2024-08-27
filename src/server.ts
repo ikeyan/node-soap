@@ -11,7 +11,7 @@ import { findPrefix } from './utils';
 import { WSDL } from './wsdl';
 import { BindingElement, IPort } from './wsdl/elements';
 
-let zlib;
+let zlib: typeof import('zlib') | undefined;
 try {
   zlib = require('zlib');
 } catch (error) {
@@ -71,6 +71,8 @@ interface IExecuteMethodOptions {
   style?: 'document' | 'rpc';
 }
 
+type ServerSoapHeader = string | ((methodName: string, args, headers, req: Request, res: Response, server: Server) => string);
+
 export class Server extends EventEmitter {
   public path: string | RegExp;
   public services: IServices;
@@ -83,7 +85,7 @@ export class Server extends EventEmitter {
   private returnFault: boolean;
   private onewayOptions: IOneWayOptions & { statusCode?: number; };
   private enableChunkedEncoding: boolean;
-  private soapHeaders: any[];
+  private soapHeaders: ServerSoapHeader[];
   private callback?: (err: any, res: any) => void;
 
   constructor(server: ServerType, path: string | RegExp, services: IServices, wsdl: WSDL, options?: IServerOptions) {
@@ -165,7 +167,7 @@ export class Server extends EventEmitter {
     this.soapHeaders[index] = soapHeader;
   }
 
-  public getSoapHeaders(): string[] {
+  public getSoapHeaders(): ServerSoapHeader[] {
     return this.soapHeaders;
   }
 
@@ -173,19 +175,16 @@ export class Server extends EventEmitter {
     this.soapHeaders = null;
   }
 
-  private _processSoapHeader(soapHeader, name, namespace, xmlns) {
+  private _processSoapHeader(soapHeader, name?: string, namespace?, xmlns?: string): ServerSoapHeader {
     switch (typeof soapHeader) {
       case 'object':
         return this.wsdl.objectToXML(soapHeader, name, namespace, xmlns, true);
       case 'function':
-        const _this = this;
-        // arrow function does not support arguments variable
-        // tslint:disable-next-line
-        return function () {
-          const result = soapHeader.apply(null, arguments);
+        return (...args) => {
+          const result = soapHeader.apply(null, args);
 
           if (typeof result === 'object') {
-            return _this.wsdl.objectToXML(result, name, namespace, xmlns, true);
+            return this.wsdl.objectToXML(result, name, namespace, xmlns, true);
           } else {
             return result;
           }
@@ -201,7 +200,7 @@ export class Server extends EventEmitter {
     this.onewayOptions.emptyBody = !!this.onewayOptions.emptyBody;
   }
 
-  private _processRequestXml(req: Request, res: Response, xml) {
+  private _processRequestXml(req: Request, res: Response, xml: string) {
     let error;
     try {
       if (typeof this.log === 'function') {
@@ -263,14 +262,11 @@ export class Server extends EventEmitter {
         return this._processRequestXml(req, res, req.body.toString());
       }
 
-      const chunks = [];
-      let gunzip;
-      let source = req;
+      let source: Request | import('zlib').Gunzip = req;
       if (req.headers['content-encoding'] === 'gzip') {
-        gunzip = zlib.createGunzip();
-        req.pipe(gunzip);
-        source = gunzip;
+        source = req.pipe(zlib.createGunzip());
       }
+      const chunks: Uint8Array[] = [];
       source.on('data', (chunk) => {
         chunks.push(chunk);
       });
@@ -293,7 +289,7 @@ export class Server extends EventEmitter {
          : soapAction;
   }
 
-  private _process(input, req: Request, res: Response, cb: (result: any, statusCode?: number) => any) {
+  private _process(input: string, req: Request, res: Response, cb: (result: any, statusCode?: number) => any) {
     const pathname = url.parse(req.url).pathname.replace(/\/$/, '');
     const obj = this.wsdl.xmlToObject(input);
     const body = obj.Body;
@@ -302,7 +298,7 @@ export class Server extends EventEmitter {
     let methodName: string;
     let serviceName: string;
     let portName: string;
-    const includeTimestamp = obj.Header && obj.Header.Security && obj.Header.Security.Timestamp;
+    const includeTimestamp = obj.Header?.Security?.Timestamp;
     const authenticate = this.authenticate || function defaultAuthenticate() { return true; };
 
     const callback = (result, statusCode) => {
@@ -486,7 +482,7 @@ export class Server extends EventEmitter {
     req: Request,
     res: Response,
     callback: (result: any, statusCode?: number) => any,
-    includeTimestamp?,
+    includeTimestamp?: boolean,
   ) {
     options = options || {};
     let method: ISoapServiceMethod;
@@ -594,7 +590,7 @@ export class Server extends EventEmitter {
     }
   }
 
-  private _envelope(body, headers, includeTimestamp) {
+  private _envelope(body, headers, includeTimestamp?: boolean) {
     const defs = this.wsdl.definitions;
     const ns = defs.$targetNamespace;
     const encoding = '';
